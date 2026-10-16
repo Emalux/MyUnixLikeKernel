@@ -508,8 +508,28 @@ all: bin-$(ARCH)/$(OUTPUT)
 # Include header dependencies.
 -include $(HEADER_DEPS)
 
+# Each kind of file depends on records of the variables it is built with,
+# named after them. Each record gets its variable as set here, as target
+# specific values, like the -fno-lto below, would otherwise reach it
+# through the files depending on it.
+override VARSFILES := $(addprefix obj-$(ARCH)/,CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS)
+ifeq ($(ARCH),x86_64)
+override VARSFILES += obj-$(ARCH)/NASMFLAGS
+endif
+$(foreach f,$(VARSFILES),$(eval $(f): override $(notdir $(f)) := $$($(notdir $(f)))))
+
+# Remake the records that differ, compared here rather than by a recipe run
+# every time, so that make can still tell when there is nothing to be done.
+override CHANGED_VARSFILES := $(foreach f,$(VARSFILES),$(shell printf '%s\n' '$(subst ','\'',$($(notdir $(f))))' | cmp -s - $(f) 2>/dev/null || echo $(f)))
+.PHONY: FORCE
+FORCE:
+$(CHANGED_VARSFILES): FORCE
+$(VARSFILES):
+	mkdir -p "$(dir $@)"
+	printf '%s\n' '$(subst ','\'',$($(notdir $@)))' > $@
+
 # Link rules for the final executable.
-bin-$(ARCH)/$(OUTPUT): GNUmakefile linker-scripts/$(ARCH).lds $(OBJ)
+bin-$(ARCH)/$(OUTPUT): GNUmakefile obj-$(ARCH)/CXX obj-$(ARCH)/CXXFLAGS obj-$(ARCH)/LDFLAGS linker-scripts/$(ARCH).lds $(OBJ)
 	mkdir -p "$(dir $@)"
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(OBJ) -o $@
 
@@ -519,23 +539,23 @@ obj-$(ARCH)/src/memory.cpp.o: override CXXFLAGS += -fno-lto
 obj-$(ARCH)/cc-runtime/src/cc-runtime.c.o: override CFLAGS += -fno-lto
 
 # Compilation rules for *.c files.
-obj-$(ARCH)/%.c.o: %.c GNUmakefile
+obj-$(ARCH)/%.c.o: %.c GNUmakefile obj-$(ARCH)/CC obj-$(ARCH)/CFLAGS obj-$(ARCH)/CPPFLAGS
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS_C) -c $< -o $@
 
 # Compilation rules for *.cpp files.
-obj-$(ARCH)/%.cpp.o: %.cpp GNUmakefile
+obj-$(ARCH)/%.cpp.o: %.cpp GNUmakefile obj-$(ARCH)/CXX obj-$(ARCH)/CXXFLAGS obj-$(ARCH)/CPPFLAGS
 	mkdir -p "$(dir $@)"
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS_CXX) -c $< -o $@
 
 # Compilation rules for *.S files.
-obj-$(ARCH)/%.S.o: %.S GNUmakefile
+obj-$(ARCH)/%.S.o: %.S GNUmakefile obj-$(ARCH)/CC obj-$(ARCH)/CFLAGS obj-$(ARCH)/CPPFLAGS
 	mkdir -p "$(dir $@)"
 	$(CC) $(CFLAGS) $(CPPFLAGS_C) -c $< -o $@
 
 ifeq ($(ARCH),x86_64)
 # Compilation rules for *.asm (nasm) files.
-obj-$(ARCH)/%.asm.o: %.asm GNUmakefile
+obj-$(ARCH)/%.asm.o: %.asm GNUmakefile obj-$(ARCH)/NASMFLAGS
 	mkdir -p "$(dir $@)"
 	nasm $(NASMFLAGS) -MD $(@:.o=.d) -MP $< -o $@
 endif
