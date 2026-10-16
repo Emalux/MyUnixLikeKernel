@@ -525,8 +525,8 @@ override CHANGED_VARSFILES := $(foreach f,$(VARSFILES),$(shell printf '%s\n' '$(
 FORCE:
 $(CHANGED_VARSFILES): FORCE
 $(VARSFILES):
-	mkdir -p "$(dir $@)"
-	printf '%s\n' '$(subst ','\'',$($(notdir $@)))' > $@
+	@mkdir -p "$(dir $@)"
+	@printf '%s\n' '$(subst ','\'',$($(notdir $@)))' > $@
 
 # Link rules for the final executable.
 bin-$(ARCH)/$(OUTPUT): GNUmakefile obj-$(ARCH)/CXX obj-$(ARCH)/CXXFLAGS obj-$(ARCH)/LDFLAGS linker-scripts/$(ARCH).lds $(OBJ)
