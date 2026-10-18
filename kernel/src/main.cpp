@@ -2,6 +2,15 @@
 #include <cstddef>
 #include <limine.h>
 
+#include "mm/pmm.hpp"
+#include "mm/vmm.hpp"
+#include "mm/heap.hpp"
+#include "arch/x86_64/idt.hpp"
+#include "arch/x86_64/interrupts.hpp"
+#include "arch/x86_64/pic.hpp"
+#include "arch/x86_64/keyboard.hpp"
+
+
 // Set the base revision to 6, this is recommended as this is the latest
 // base revision described by the Limine boot protocol specification.
 // See specification for further info.
@@ -23,6 +32,22 @@ namespace {
 __attribute__((used, section(".limine_requests")))
 volatile limine_framebuffer_request framebuffer_request = {
     .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_memmap_request
+memmap_request = {
+    .id = LIMINE_MEMMAP_REQUEST_ID,
+    .revision = 0,
+    .response = nullptr
+};
+
+__attribute__((used, section(".limine_requests")))
+static volatile struct limine_hhdm_request
+hhdm_request = {
+    .id = LIMINE_HHDM_REQUEST_ID,
     .revision = 0,
     .response = nullptr
 };
@@ -110,11 +135,199 @@ void fb_pattern(limine_framebuffer *fb) {
 }
 
 }
+// MyUnix Serial COM1 Output (X86_64)
+static inline void outb(uint16_t port, uint8_t value) {
+    asm volatile (
+        "outb %0, %1"
+        :
+        : "a"(value), "Nd"(port)
+    );
+}
+
+static void serial_init() {
+    constexpr uint16_t COM1 = 0x3F8;
+
+    outb(COM1 + 1, 0x00); //disable interrupts
+    outb(COM1 + 3, 0x80); //enable DLAB
+    outb(COM1 + 0, 0x03); //set baud rate to 38400 (low byte)
+    outb(COM1 + 1, 0x00); //set baud rate to
+    outb(COM1 + 3, 0x03); //8 bits, no parity, one stop bit
+    outb(COM1 + 2, 0xC7); //enable FIFO,
+    outb(COM1 + 4, 0x0B); //IRQs enabled, RTS/DSR set
+}
+
+static void serial_write(const char* text) {
+    constexpr uint16_t COM1 = 0x3F8;
+
+    while (*text) {
+        if (*text == '\n') {
+            outb(COM1, '\r'); // Carriage return for new line
+        }
+
+        outb(COM1, static_cast<uint8_t>(*text));
+        ++text;
+    }
+}
 
 // The following will be our kernel's entry point.
 // If renaming kmain() to something else, make sure to change the
 // linker script accordingly.
 extern "C" void kmain() {
+
+    // Just to see if the kernel is loading
+    serial_init();
+    serial_write("\n\n\n\n\n");
+    serial_write("===============================\n");
+    serial_write("         MyUnix Kernel\n");
+    serial_write("===============================\n");
+    serial_write("Architecture: x86_64\n");
+    serial_write("Linguage: C++\n");
+    serial_write("bootloader: Limine\n");
+    serial_write("with love by Emalux <3\n");
+    serial_write("kernel inicialized successfully!\n");
+    serial_write("\n");
+
+    // to see if the PMM is working and if it falls
+    if (!MyUnix::Memory::initialize(
+        memmap_request.response)) {
+    serial_write("[PMM] failed at boot!\n");
+} else {
+    serial_write("[PMM] Initialized!\n");
+
+    uint64_t page = MyUnix::Memory::allocate_page();
+
+    if (page != 0) {
+        serial_write("[PMM] Page allocated!\n");
+
+        if (MyUnix::Memory::free_page(page)) {
+            serial_write("[PMM] Page freed!\n");
+        } else {
+            serial_write("[PMM] Failed to free page!\n");
+        }
+    } else {
+        serial_write("[PMM] No pages available!\n");
+    }
+}
+    // to see if HHDM/VMM is working or it falls
+    if (hhdm_request.response == nullptr) {
+    serial_write("[VMM] HHDM unavailable!\n");
+} else if (!MyUnix::Memory::VMM::initialize(
+               hhdm_request.response->offset)) {
+    serial_write("[VMM] Failed to initialize!\n");
+} else {
+    serial_write("[VMM] Initialized!\n");
+
+    constexpr uint64_t TEST_VIRTUAL = 0x0000400000000000ULL;
+
+    uint64_t page = MyUnix::Memory::allocate_page();
+
+    if (page == 0) {
+        serial_write("[VMM] No physical pages available!\n");
+    } else if (!MyUnix::Memory::VMM::map_page(
+                   TEST_VIRTUAL,
+                   page,
+                   MyUnix::Memory::VMM::Writable)) {
+        serial_write("[VMM] Failed to map page!\n");
+        MyUnix::Memory::free_page(page);
+    } else {
+        uint64_t translated = 0;
+
+        if (MyUnix::Memory::VMM::translate(
+                TEST_VIRTUAL, translated) &&
+            translated == page) {
+            serial_write("[VMM] Mapping confirmed!\n");
+        } else {
+            serial_write("[VMM] Translation failed!\n");
+        }
+
+        if (MyUnix::Memory::VMM::unmap_page(TEST_VIRTUAL)) {
+            serial_write("[VMM] Mapping removed!\n");
+
+            if (MyUnix::Memory::free_page(page)) {
+                serial_write("[VMM] Physical page freed!\n");
+            }
+        }
+    }
+}
+
+    // Kernel heap initialization
+
+if (!MyUnix::Memory::Heap::initialize()) {
+    serial_write("[HEAP] failed to initialize!\n");
+} else {
+    serial_write("[HEAP] Initialized!\n");
+
+    auto* data = static_cast<uint8_t*>(
+        MyUnix::Memory::Heap::allocate(64)
+    );
+
+    if (data == nullptr) {
+        serial_write("[HEAP] failed to allocate!\n");
+    } else {
+        // Escreve na memória recém-alocada.
+        for (size_t i = 0; i < 64; ++i) {
+            data[i] = static_cast<uint8_t>(i);
+        }
+
+        bool valid = true;
+
+        for (size_t i = 0; i < 64; ++i) {
+            if (data[i] != static_cast<uint8_t>(i)) {
+                valid = false;
+                break;
+            }
+        }
+
+        serial_write(valid
+            ? "[HEAP] reading and writing OK!\n"
+            : "[HEAP] failed to verify!\n");
+
+        if (MyUnix::Memory::Heap::deallocate(data)) {
+            serial_write("[HEAP] Memory freed!\n");
+        } else {
+            serial_write("[HEAP] failed to free memory!\n");
+        }
+    }
+}
+
+    // Initialize the IDT and set up exception handlers.
+    if (!MyUnix::Arch::X86_64::IDT::initialize()) {
+        
+    serial_write("[IDT] Failed to initialize!\n");
+
+    for (;;) {
+        asm volatile("cli; hlt");
+    }
+}
+
+serial_write("[IDT] Initialized!\n");
+
+asm volatile("cli" ::: "memory");
+
+if (!MyUnix::Arch::X86_64::PIC::initialize()) {
+    serial_write("[PIC] Falha ao inicializar.\n");
+    for (;;) {
+        asm volatile("hlt");
+    }
+}
+
+serial_write("[PIC] Inicializado. Vetores: 0x20-0x2F\n");
+
+if (!MyUnix::Arch::X86_64::Keyboard::initialize()) {
+    serial_write("[KEYBOARD] Falha ao inicializar PS/2.\n");
+} else {
+    serial_write("[KEYBOARD] PS/2 inicializado.\n");
+    MyUnix::Arch::X86_64::PIC::unmask_irq(1);
+}
+
+serial_write("[BOOT] Habilitando interrupcoes\n");
+asm volatile("sti" ::: "memory");
+    for (;;) {
+        asm volatile("hlt");
+    }
+
+    
+
     // Ensure the bootloader actually understands our base revision (see spec).
     if (LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) == false) {
         hcf();
@@ -145,4 +358,6 @@ extern "C" void kmain() {
 
     // We're done, just hang...
     hcf();
+
+    
 }
